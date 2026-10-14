@@ -27,6 +27,7 @@ import com.google.gerrit.server.extensions.events.AbstractNoNotifyEvent;
 import com.google.gerrit.server.plugincontext.PluginSetContext;
 import com.google.inject.Inject;
 import java.io.PrintWriter;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
@@ -85,32 +86,41 @@ public class GarbageCollection {
         Sets.difference(Sets.newHashSet(projectNames), projectsToGc)) {
       result.addError(new GcError(GcError.Type.GC_ALREADY_SCHEDULED, projectName));
     }
-    for (Project.NameKey p : projectsToGc) {
-      try (Repository repo = repoManager.openRepository(p)) {
-        logGcConfiguration(p, repo, aggressive);
-        print(writer, "collecting garbage for \"" + p + "\":\n");
-        GarbageCollectCommand gc =
-            Git.wrap(
-                    repo instanceof DelegateRepository
-                        ? ((DelegateRepository) repo).delegate()
-                        : repo)
-                .gc();
-        gc.setAggressive(aggressive);
-        logGcInfo(p, "before:", gc.getStatistics());
-        gc.setProgressMonitor(
-            writer != null ? new TextProgressMonitor(writer) : NullProgressMonitor.INSTANCE);
-        Properties statistics = gc.call();
-        logGcInfo(p, "after: ", statistics);
-        print(writer, "done.\n\n");
-        fire(p, statistics);
-      } catch (RepositoryNotFoundException e) {
-        logGcError(writer, p, e);
-        result.addError(new GcError(GcError.Type.REPOSITORY_NOT_FOUND, p));
-      } catch (Exception e) {
-        logGcError(writer, p, e);
-        result.addError(new GcError(GcError.Type.GC_FAILED, p));
-      } finally {
-        gcQueue.gcFinished(p);
+    Set<Project.NameKey> pending = new HashSet<>(projectsToGc);
+    try {
+      for (Project.NameKey p : projectsToGc) {
+        try (Repository repo = repoManager.openRepository(p)) {
+          logGcConfiguration(p, repo, aggressive);
+          print(writer, "collecting garbage for \"" + p + "\":\n");
+          GarbageCollectCommand gc =
+              Git.wrap(
+                      repo instanceof DelegateRepository
+                          ? ((DelegateRepository) repo).delegate()
+                          : repo)
+                  .gc();
+          gc.setAggressive(aggressive);
+          logGcInfo(p, "before:", gc.getStatistics());
+          gc.setProgressMonitor(
+              writer != null ? new TextProgressMonitor(writer) : NullProgressMonitor.INSTANCE);
+          Properties statistics = gc.call();
+          logGcInfo(p, "after: ", statistics);
+          print(writer, "done.\n\n");
+          fire(p, statistics);
+        } catch (RepositoryNotFoundException e) {
+          logGcError(writer, p, e);
+          result.addError(new GcError(GcError.Type.REPOSITORY_NOT_FOUND, p));
+        } catch (Throwable t) {
+          logGcError(writer, p, t);
+          result.addError(new GcError(GcError.Type.GC_FAILED, p));
+        } finally {
+          if (pending.remove(p)) {
+            gcQueue.gcFinished(p);
+          }
+        }
+      }
+    } finally {
+      for (Project.NameKey remaining : pending) {
+        gcQueue.gcFinished(remaining);
       }
     }
     return result;
@@ -176,16 +186,17 @@ public class GarbageCollection {
     return b.toString();
   }
 
-  private static void logGcError(PrintWriter writer, Project.NameKey projectName, Exception e) {
+  private static void logGcError(PrintWriter writer, Project.NameKey projectName, Throwable t) {
     print(writer, "failed.\n\n");
     StringBuilder b = new StringBuilder();
     b.append("[").append(projectName.get()).append("]");
-    logger.atSevere().withCause(e).log("%s", b);
+    logger.atSevere().withCause(t).log("%s", b);
   }
 
   private static void print(PrintWriter writer, String message) {
     if (writer != null) {
       writer.print(message);
+      writer.flush();
     }
   }
 

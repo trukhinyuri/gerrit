@@ -61,7 +61,11 @@ public class GarbageCollectionRunner implements Runnable {
   @Override
   public void run() {
     logger.atInfo().log("Triggering gc on all repositories");
-    garbageCollectionFactory.create().run(Lists.newArrayList(projectCache.all()));
+    try {
+      garbageCollectionFactory.create().run(Lists.newArrayList(projectCache.all()));
+    } catch (Throwable t) {
+      logger.atSevere().withCause(t).log("Scheduled garbage collection run failed");
+    }
   }
 
   @Override
